@@ -1,8 +1,9 @@
-# the only reason that we NEED to load in the electron_configurations data is that it's unclear to
-# me exactly how I would compute certain quantities
+# the only reason that we NEED to load in the electron_configurations data is that it's not
+# completely clear to me exactly how I would compute certain quantities (i.e. the statistical weight and the ground state energy)
 
 include("../Korg.jl")
 using Base
+using Interpolations
 
 struct StateID
     iSLP::UInt16
@@ -59,6 +60,7 @@ _get_species_string(atomic_num::Integer, num_electrons::Integer) =
 
 const _ELECTRON_CONFIG_TABLE_BREAK =
     " ===================================================================="
+
 """
     read_electron_configurations(fname)
 
@@ -133,19 +135,11 @@ function read_electron_configurations(fname)
     outputs
 end
 
-# test code!
-#
-#println(result[1])
-
-
-
-
 
 # The files holding the photoionization cross sections can be massive. With that in mind, I'm
 # writing an iterator to handle this. I'm following the design pattern used in the Julia standard
 # library for implementing the ``EachLine`` iterable object. We need to acknowledge the Julia Base
 # library's MIT license
-
 
 const _TABLE_BREAK = " ================================================"
 const _HEADER_LINE_LENGTH = length(_TABLE_BREAK)
@@ -209,21 +203,25 @@ Base.eltype(::Type{<:EachPhotoIonSubtable}) =
 Base.IteratorSize(::Type{<:EachPhotoIonSubtable}) = SizeUnknown()
 
 
-using Interpolations
-using Plots
-read_electron_configurations("../../data/TOPbase/electron_config/Si.txt")
 
-T = 5000.0
-λ_vals = map((λ) -> Float32(λ), 100:1.0:40000)
 
-function func(λ_vals, T, species_name)
+"""
+    _OP_bf_tabulated_cross_section(λ_vals, T, species_name)
+
+Calculates the LTE cross section (in Mbarn) of an ion species from the Opacity Project tables. This
+basically computes the weighted average of all of the energy levels (weighted by the LTE energy 
+levels). This is corrected for stimulated emission.
+
+To get the opacity, this needs to be multiplied by the number density of the species and divided by
+the total density.
+"""
+function _OP_bf_tabulated_cross_section(λ_vals, T, species_name)
 
     split_name = split(species_name, "_")
     @assert length(split_name) == 2
     element_name = split_name[1]
     ion_state = split_name[2]
     @assert ion_state in Korg.numerals
-
 
     electron_config_file = joinpath(Korg._data_dir,
                                     string("TOPbase/electron_config/", element_name, ".txt"))
@@ -232,7 +230,6 @@ function func(λ_vals, T, species_name)
     println(electron_config_file)
     println(photo_ion_file)
 
-    #result = read_electron_configurations("../../data/TOPbase/electron_config/Si.txt")
     result = read_electron_configurations(electron_config_file)
 
     rslt_index = 0
@@ -253,13 +250,38 @@ function func(λ_vals, T, species_name)
 
     total_weight = 0.0
 
-    p = plot()
-
-    #itr = each_photo_ion_subtable("../../data/TOPbase/cross_sections/Si_I.txt")
     itr = each_photo_ion_subtable(photo_ion_file)
+    i = 0
     for (species, state_id, table_photon_energy_ryd, table_cross_section_MBarn) in itr
+        i+=1
         if length(table_photon_energy_ryd) == 0
             continue
+        end
+
+        if species_name in ["He_I", "C_I", "C_II", "Al_II", "O_II"]
+            # In a couple tables, there's a place where the photon energy is listed out of order
+            # This seems to be okay given that this is in a section of the table where the
+            # cross-section is zero.
+            for j in 1:length(table_photon_energy_ryd)-1
+                if table_photon_energy_ryd[j+1] < table_photon_energy_ryd[j]
+                    @assert j > 1
+                    @assert (j + 2) <= length(table_photon_energy_ryd)
+                    @assert table_photon_energy_ryd[j+2] >= table_photon_energy_ryd[j+1]
+                    @assert table_photon_energy_ryd[j+2] >= table_photon_energy_ryd[j]
+                    @assert table_photon_energy_ryd[j+1] >= table_photon_energy_ryd[j-1]
+                    @assert table_photon_energy_ryd[j] >= table_photon_energy_ryd[j-1]
+
+                    @assert table_cross_section_MBarn[j+2] == 0.0
+                    @assert table_cross_section_MBarn[j+1] == 0.0
+                    @assert table_cross_section_MBarn[j] == 0.0
+                    @assert table_cross_section_MBarn[j-1] == 0.0
+
+                    # swap the order of the 2 values
+                    temp = table_photon_energy_ryd[j]
+                    table_photon_energy_ryd[j] = table_photon_energy_ryd[j+1]
+                    table_photon_energy_ryd[j+1] = temp
+                end
+            end
         end
 
         func = LinearInterpolation(table_photon_energy_ryd, table_cross_section_MBarn,
@@ -274,55 +296,56 @@ function func(λ_vals, T, species_name)
 
         current_cross_section = func.(photon_energies) .* (1.0 .- exp.(-photon_energies.*β_Ryd))
         weighted_average .+= (current_cross_section .* weight)
-        #if weight > 0.0001
-        #    plot!(p, λ_vals, weight .* current_cross_section)
-        #end
     end
     weighted_average
 end
 
+# Need to standardize some tests and delete all of the following:
 
-Si_I_opacity = func(λ_vals, T, "Si_I")
-Si_II_opacity = func(λ_vals, T, "Si_II")
-Al_I_opacity = func(λ_vals, T, "Al_I")
-#Al_II_opacity = func(λ_vals, T, "Al_II")
-H_I_opacity = func(λ_vals, T, "H_I")
 
-p = plot(λ_vals, [H_I_opacity, Al_I_opacity, #Al_II_opacity,
-                  Si_I_opacity, Si_II_opacity],
-         labels = ["H I" "Al I" "Si I" "Si II"],
+using Plots
+
+T = 5000.0
+λ_vals = map((λ) -> Float32(λ), 100:1.0:40000)
+
+H_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "H_I")
+
+He_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "He_I")
+He_II_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "He_II")
+
+C_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "C_I")
+C_II_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "C_II")
+
+N_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "N_I")
+N_II_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "N_II")
+
+O_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "O_I")
+O_II_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "O_II")
+
+Mg_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "Mg_I")
+Mg_II_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "Mg_II")
+
+Al_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "Al_I")
+Al_II_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "Al_II")
+
+Si_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "Si_I")
+Si_II_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "Si_II")
+
+Ca_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "Ca_I")
+Ca_II_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "Ca_II")
+
+p = plot(λ_vals, [H_I_opacity,
+                  He_I_opacity, He_II_opacity,
+                  C_I_opacity, C_II_opacity,
+                  N_I_opacity, N_II_opacity,
+                  O_I_opacity, O_II_opacity,
+                  Mg_I_opacity, Mg_II_opacity,
+                  Al_I_opacity, Al_II_opacity,
+                  Si_I_opacity, Si_II_opacity,
+                  Ca_I_opacity, Ca_II_opacity],
+         labels = ["H I" "He I" "He II" "C I" "C II" "N I" "N II" "O I" "O II" "Mg I" "Mg II" "Al I" "Al II" "Si I" "Si II" "Ca I" "Ca II"],
          ylim = [0.0001, 80], yscale = :log10, xlim = [0, 1e4])
-         #yscale = :log10) #xlim = [0.0, 2500.0], yscale = :log10)
-
-#println(weighted_average)
-
-
-
-#println(result[1][1])
-#println(result[2][1])
-#println(result[3][1])
-
-#println(total_weight)
-#println(weighted_average)
-
-#plot!(p, λ_vals, weighted_average, label = "weighted_average", xlim = [0.0, 2500.0])
-#         yscale = :log10, )#xlim = [0.0, 1.5], ylim = [1e-2, 1e1])
 
 gui()
 
-#println(species_name)
-#println(StateID(211,1))
-#
-#
-#for (species, state_id, energy_array_ryd, cross_section) in itr
-#    if (state_id == StateID(211,1))
-#
-#        p = plot(energy_array_ryd .+ data_dict[state_id].ion_energy_ryd, cross_section,
-#                 yscale = :log10, )#xlim = [0.0, 1.5], ylim = [1e-2, 1e1])
-#        break
-#    end
-#end
-#gui()
-#(elem2,_) = iterate(itr)
-#println(elem1[1], " ", elem1[2])
-#println(elem2[1], " ", elem2[2])
+
