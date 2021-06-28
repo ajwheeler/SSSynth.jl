@@ -4,7 +4,36 @@
 include("../Korg.jl")
 using Base
 using Interpolations
+# import Korg.partition_funcs, Korg.atomic_symbols, Korg.numerals, and constants
 
+
+# While the StateID struct and its helper functions may seem a little over-engineered, they
+# primarily exist to document the iSLP and iLV quantities used by TOPBase
+
+"""
+    StateID(iSLP, iLV)
+
+`StateID` represents a given state (electron configuration) of an ion species. The arguments are
+taken from the TOPBase.
+
+# Arguments
+- `iSLP::UInt16`: An integer representing the quantum atomic numbers SLπ (total spin, orbital
+  angular momentum, and parity). The value is given by `100*(2*S+1) + 10*L + π`. Note that TOPBase
+  documentation refers to the parity quantum number as P or π, but for consistency with how TOPBase
+  presents the data, we prefer P in our implementation code.
+- `iLV::UInt8`: Distinguishes between configurations that have the same values of `iSLP`. TOPBase
+  seems to index the configuration based on the energy level of the configuration (with `iLV = 1`
+  corresponding to the lowest energy).
+
+# Notes
+The combination of this struct and an ion species (or neutral element) should be enough to fully
+specify a given electron configuration. For example, consider He I:
+- `iSLP = 100, iLV = 1` has the electron configuration: 1s²
+- `iSLP = 100, iLV = 2` has the electron configuration: 1s 2s
+- `iSLP = 100, iLV = 3` has the electron configuration: 1s 3s
+- `iSLP = 111, iLV = 1` has the electron configuration: 1s 2p
+- `iSLP = 111, iLV = 2` has the electron configuration: 1s 3p
+"""
 struct StateID
     iSLP::UInt16
     iLV::UInt8
@@ -16,13 +45,11 @@ struct StateID
     end
 end
 
-# I'm not sure any of this is necessary, but I wanted to document this
 Base.:(<)(a::StateID, b::StateID) = (a.iSLP < b.iSLP) || ((a.iSLP == b.iSLP) && (a.iLV < b.iLV))
 Base.:(==)(a::StateID, b::StateID) = (a.iSLP == b.iSLP) && (a.iLV == b.iLV)
 Base.hash(obj::StateID) = Base.hash((UInt32(obj.iSLP) << 16) + obj.iLV)
 Base.show(io::IO, obj::StateID) = print(io, "StateID{iSLP = ", obj.iSLP, ", iLV = ", obj.iLV, "}")
 
-# this isn't strictly necessary, but I wanted to document it
 function _quantum_prop_type(state_id::StateID)
     str = String(iSLP)
     S = div(Integer(str[1])-1,2)
@@ -34,19 +61,31 @@ get_S_quantum_num(state_id::StateID) = _quantum_prop_type(state_id)[1]
 get_L_quantum_num(state_id::StateID) = _quantum_prop_type(state_id)[2]
 get_parity(state_id::StateID) = _quantum_prop_type(state_id)[3]
 
+
+"""
+    StateProp(ion_energy_ryd, excitation_potential_ryd, statistical_weight, electron_config)
+
+`StateProp` holds data associated with different electron configurations. It's mostly used to hold
+data read from TOPBase electron configuration queries (see `read_electron_configurations`)
+
+# Notes
+
+It should be possible to directly determine `electron_config` and `statistical_weight` given a
+species name and a `StateID` instance. However, the procedure for doing so is not entirely obvious
+"""
 struct StateProp
     ion_energy_ryd::Float64 # energy with respect to ionization potential in Rydbergs
     excitation_potential_ryd::Float64 # energy above ground state in Rydbergs
-    # the following properties can technically be computed from the species name and StateID
-    # but the procedure to do so isn't obvious to me
-    statistical_weight::UInt8 # technically this can be directly computed
+    statistical_weight::UInt16
     electron_config::String
 end
 
-# parses the atomic_num, number of electrons, iSLP, and iLV entries of the table
+
+# define some generally useful functions related to parsing
 function _parse_Z_numelectrons_stateid(str::AbstractString, start_Z::Integer,
                                        start_numElectrons::Integer, start_iSLP::Integer,
                                        start_iLV::Integer, last_iLV::Integer)
+    # parses the atomic_num, number of electrons, iSLP, and iLV entries of the table
     atomic_num = parse(UInt8, str[start_Z:start_numElectrons-1])
     num_electrons = parse(UInt8, str[start_numElectrons:start_iSLP-1])
     iSLP = parse(UInt16, str[start_iSLP:start_iLV-1])
@@ -58,26 +97,50 @@ _get_species_string(atomic_num::Integer, num_electrons::Integer) =
     Korg.atomic_symbols[atomic_num] * "_" * Korg.numerals[atomic_num-num_electrons+1]
 
 
+# Functionallity for reading tables of electron configuration data
 const _ELECTRON_CONFIG_TABLE_BREAK =
-    " ===================================================================="
+        " ===================================================================="
 
 """
     read_electron_configurations(fname)
 
-Parse the provided table produced by an Energy levels query on
-[TOPbase](http://cdsweb.u-strasbg.fr/topbase/energy.html).
+Parse the electron configuration table stored in fname. This function returns a vector of 2-tuples.
+The first entry of each tuple is the name of a species and the second entry is a dictionary holding
+properties for various electron configurations of that species. The keys of each dictionary are
+instances of `StateID` and the values are instances of `StateProp`.
 
-This expects that the query:
-- only includes a single atomic number is included in the query
-- orders the output levels in the Level order in each spectroscopic series
-- the output data for each level should only include the "Electron
-  configuration," "Energy (Ryd) wrt ionization potential," and "Statistical
-  weight."
+# Notes
+This implementation is not robust enough to deal with blank lines at the start or end of the file
+
+The table should have been produced by a
+[TOPbase Energy levels query](http://cdsweb.u-strasbg.fr/topbase/energy.html). The
+requirements for the query are described below:
+
+This function expects a table produced with the following query options:
+- Only a single atomic number is included in the query
+- There isn't any limitation on the number of electrons, the quantum numbers, the energy or the
+  levels
+- The query request levels ordered in the "Level order in each series"
+
+Under the output options, the following output data options should be checked:
+- "Electron configuration"
+- "Energy (Ryd) wrt ionization potential"
+- "Energy (Ryd) wrt ground state"
+- "Statistical weight"
+
+A lot of the data read in by this function is technically unnecessary:
+- The "Electron Configuration" data is only used for debugging purposes.
+- It should be possible to construct the "Statistical Weight" data (and "Statistical Weight" data)
+  given the species names and a `StateID`. However, the procedure for doing so is not obvious.
+- Given "Energy (Ryd) wrt ionization potential" for all states of a given species, we should be
+  able to compute "Energy (Ryd) wrt ground state". However, it's not completely obvious how to
+  identify the ground state.
 """
 function read_electron_configurations(fname)
 
-    # for simplicity, we're going to make a dict. But the values are ordered
-    #data_pairs = Vector{Tuple{StateID,StateProp}}()
+    # The choice to use a dict for pair StateID instances with StateProp instances was made for
+    # simplicity. A more efficient data structure could be chosen since the values are ordered (and
+    # are generally accessed in order)
 
     outputs = Vector{Tuple{String,Dict{StateID,StateProp}}}()
 
@@ -118,15 +181,15 @@ function read_electron_configurations(fname)
             ion_energy_ryd = parse(Float32, line[40:51])
             excitation_potential_ryd = parse(Float32, line[53:64])
 
-            # finally parse statistical weight. This is always listed as 1 or 2 digits followed by
-            # decimal point followed by a zero. Since statistical weight is always an int, we'll
-            # only parse the leading 2 characters.
+            # finally, parse statistical weight. This is always listed as 1 or 2 digits, a decimal
+            # point, and then a zero. Since statistical weight is always an int, we'll only parse
+            # the leading 2 characters.
 
             if line[66:69] == "****"
                 # I think that this is only an issue for 1 highly excited state of Fe
                 continue
             end
-            statistical_weight = parse(UInt8, line[66:67])
+            statistical_weight = parse(UInt16, line[66:67])
 
             current_dict[state_id] = StateProp(ion_energy_ryd, excitation_potential_ryd,
                                                statistical_weight, electron_config)
@@ -135,11 +198,34 @@ function read_electron_configurations(fname)
     outputs
 end
 
+# Functionallity for reading photoionization cross sections. Since these tables can be massive, we
+# use an iterator to do this. This is based on the design used in the Julia standard library for
+# implementing the ``EachLine`` iterable object. That code used the following license:
+#
+# Copyright (c) 2009-2021: Jeff Bezanson, Stefan Karpinski, Viral B. Shah,
+# and other contributors:
+#
+# https://github.com/JuliaLang/julia/contributors
+#
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files (the
+# "Software"), to deal in the Software without restriction, including
+# without limitation the rights to use, copy, modify, merge, publish,
+# distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so, subject to
+# the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+# LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+# WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-# The files holding the photoionization cross sections can be massive. With that in mind, I'm
-# writing an iterator to handle this. I'm following the design pattern used in the Julia standard
-# library for implementing the ``EachLine`` iterable object. We need to acknowledge the Julia Base
-# library's MIT license
 
 const _TABLE_BREAK = " ================================================"
 const _HEADER_LINE_LENGTH = length(_TABLE_BREAK)
@@ -152,9 +238,31 @@ end
 """
     each_photo_ion_subtable(filename::AbstractString)
 
-Create an iterable `EachPhotoIonSubtable` object that will yield each photoionization subtable from
-the input filename. The underlying file is only closed after the `EachPhotoIonSubtable` is garbage
-collected. If this is a problem, we probably need to do some light refactoring.
+Create an iterable `EachPhotoIonSubtable` object for parsing photoionization cross-sections.
+
+The input file is organized as a series of subtables. Each subtable provides the photoionization
+energies (make sure this isn't the energy of the photoionized electron) in Ryd, and the associated
+cross section (in megabarns) for a different state.
+
+Each entry in the `EachPhotoIonSubtable` iterable provides a named tuple with the keys:
+- name: holds the species name
+- state_id: holds a `StateID` instance
+- photon_energy_ryd: the photoionization values (check), in Ryd, stored in an array of Float32 vals
+- cross_section_MegaBarn: the associated photoionization cross-sections. This array should have the
+  same shape and datatype as photon_energy_ryd
+
+The underlying file is only closed after the `EachPhotoIonSubtable` is garbage collected.
+
+#Notes
+This implementation is not robust enough to deal with blank lines at the start or end of the file.
+
+The table should have been produced by a
+[TOPbase Photoionisation Cross Section query](http://cdsweb.u-strasbg.fr/topbase/xsections.html)
+that uses the following query options:
+- Only a single atomic number and a single number of electrons is included in the query (other
+  choices may yield too many results, which causes TOPBase to truncate output).
+- There isn't any limitation on the number the quantum numbers, the energy or the levels
+- The query request levels ordered in the "Level order in each series"
 """
 function each_photo_ion_subtable(filename::AbstractString)
     stream = open(filename, "r")
@@ -194,7 +302,8 @@ function Base.iterate(itr::EachPhotoIonSubtable, state=nothing)
     end
 
     # parse the species, and the level
-    ((species, state_id, photon_energy_ryd, cross_section_MegaBarn), nothing)
+    ((species = species, state_id=state_id, photon_energy_ryd = photon_energy_ryd,
+      cross_section_MegaBarn = cross_section_MegaBarn), nothing)
 end
 
 Base.eltype(::Type{<:EachPhotoIonSubtable}) =
@@ -204,34 +313,60 @@ Base.IteratorSize(::Type{<:EachPhotoIonSubtable}) = SizeUnknown()
 
 
 
+function _interpolator_from_subtable(table_photon_energy_ryd::Vector{Float32},
+                                     table_cross_section_MBarn::Vector{Float32},
+                                     species_name::Union{AbstractString,Nothing} = nothing)
+    if species_name in ["He_I", "C_I", "C_II", "Al_II", "O_II"]
+        # In a couple tables, there's a place where the photon energy is listed out of order
+        # This seems to be okay given that this is in a section of the table where the
+        # cross-section is zero.
+        for j in 1:length(table_photon_energy_ryd)-1
+            if table_photon_energy_ryd[j+1] < table_photon_energy_ryd[j]
+                @assert j > 1
+                @assert (j + 2) <= length(table_photon_energy_ryd)
+                @assert table_photon_energy_ryd[j+2] >= table_photon_energy_ryd[j+1]
+                @assert table_photon_energy_ryd[j+2] >= table_photon_energy_ryd[j]
+                @assert table_photon_energy_ryd[j+1] >= table_photon_energy_ryd[j-1]
+                @assert table_photon_energy_ryd[j] >= table_photon_energy_ryd[j-1]
 
-"""
-    _OP_bf_tabulated_cross_section(λ_vals, T, species_name)
+                @assert table_cross_section_MBarn[j+2] == 0.0
+                @assert table_cross_section_MBarn[j+1] == 0.0
+                @assert table_cross_section_MBarn[j] == 0.0
+                @assert table_cross_section_MBarn[j-1] == 0.0
 
-Calculates the LTE cross section (in Mbarn) of an ion species from the Opacity Project tables. This
-basically computes the weighted average of all of the energy levels (weighted by the LTE energy 
-levels). This is corrected for stimulated emission.
+                # swap the order of the 2 values
+                temp = table_photon_energy_ryd[j]
+                table_photon_energy_ryd[j] = table_photon_energy_ryd[j+1]
+                table_photon_energy_ryd[j+1] = temp
+            end
+        end
+    end
+    LinearInterpolation(table_photon_energy_ryd, table_cross_section_MBarn,
+                        extrapolation_bc=0.0)
+end
 
-To get the opacity, this needs to be multiplied by the number density of the species and divided by
-the total density.
-"""
-function _OP_bf_tabulated_cross_section(λ_vals, T, species_name)
+function _get_tabulated_data(species_name, elec_conf_table = nothing,
+                             cross_sec_file::Union{AbstractString,Nothing} = nothing)
 
+    # Split appart the species_name (and check that its sensible)
     split_name = split(species_name, "_")
     @assert length(split_name) == 2
     element_name = split_name[1]
     ion_state = split_name[2]
     @assert ion_state in Korg.numerals
 
-    electron_config_file = joinpath(Korg._data_dir,
-                                    string("TOPbase/electron_config/", element_name, ".txt"))
-    photo_ion_file = joinpath(Korg._data_dir,
-                              string("TOPbase/cross_sections/", species_name, ".txt"))
-    println(electron_config_file)
-    println(photo_ion_file)
+    # find electron configuration dict:
+    my_elec_config_file = if isnothing(elec_conf_table)
+        # look at environment variable KORG_OP_ELECTRON_CONFIG_DIR
+        println("Searching for electron_config_file in KORG_OP_ELECTRON_CONFIG_DIR")
+        joinpath(Korg._data_dir,
+                 string("TOPbase/electron_config/", element_name, ".txt"))
+    else
+        elec_conf_table
+    end
+    println(my_elec_config_file)
 
-    result = read_electron_configurations(electron_config_file)
-
+    result = read_electron_configurations(my_elec_config_file)
     rslt_index = 0
     for i = 1:length(result)
         if result[i][1] == species_name
@@ -239,18 +374,89 @@ function _OP_bf_tabulated_cross_section(λ_vals, T, species_name)
         end
     end
     @assert rslt_index != 0
-
     data_dict = result[rslt_index][2]
 
-    photon_energies = (Korg.hplanck_eV * Korg.c_cgs * 1.0e8) ./ λ_vals ./ Korg.RydbergH_eV
-    inv_partition_func_val = 1.0/Korg.partition_funcs[species_name](T)
-    weighted_average = 0.0 .* photon_energies
+    # get the photo-ionization subtable iterator:
+    my_cross_sec_file = if isnothing(cross_sec_file)
+        joinpath(Korg._data_dir,
+                 string("TOPbase/cross_sections/", species_name, ".txt"))
+    else
+        cross_sec_file
+    end
+
+    (data_dict, each_photo_ion_subtable(my_cross_sec_file))
+end
+
+
+@doc raw"""
+    weighted_bf_cross_section_TOPBase(λ_vals, T, species_name; convert_to_cm2 = false,
+                                      partition_func = nothing)
+
+Calculate the combined bound-free cross section of an ion species using data from the Opacity
+Project. The result includes contributions from all (provided) energy states, weighted by the
+Boltzmann distribution, and includes the LTE correction for for stimulated emission.
+
+# Arguments
+- `λ_vals`: an iterable collection of wavelengths (in Å) to compute the cross sections at
+- `T`: Temperature in K
+- `species_name`: name of the ion species
+- `convert_to_cm2`: When True, returns the weighted cross section in units of cm². Otherwise, the
+  results have units of megabarnes. Default is False.
+- `partition_func`: Specifies the partition function for the current species. This should be a
+  callable that accepts Temperature as an argument. When this is `nothing`, it falls back to the
+  default partition functions.
+
+# Explanation
+In more mathematical rigor, this function basically evaluates the following equation:
+
+``\overline{\sigma_{{\rm bf},s}}(\lambda,T) = \sum_{{\bf n}\in{\rm states}} \frac{ g_{s,{\bf n}}}{Z_s(T)} e^{-E_{s,{\bf n}}/(k_B T)}\left(1 - e^{-h c/(\lambda k_B T)}\right) \sigma_{{\rm bf}, s,{\bf n}}(\lambda)``
+
+where the ``s`` subscript corresponds to a given species. In this equation:
+- ``g_{s,{\bf n}}`` is the statistical weight of state ``{\bf n}`` for species ``s``.
+- ``Z_s`` is the partition function for species ``s``.
+- ``E_{s,{\bf n}}`` is the excitation potential of state ``{\bf n}`` for species ``s``. In other
+  words, its the energy difference between state ``{\bf n}`` and the ground state.
+- ``\sigma_{\lambda,{\rm bf}, s,{\bf n}}`` is the bound free cross-section (a.k.a. photo-ionization
+  cross section) of state ``{\bf n}`` for species ``s``.
+
+Under the assumption of LTE, the linear aborption coefficient for bound-free absorption is simply:
+``\alpha_{\lambda,{\rm bf},s} = n_{s,{\rm tot}} \overline{\sigma_{{\rm bf},s}}(\lambda,T)``.
+
+# Notes
+In the future, it needs to be possible to pass an argument that adjusts .
+"""
+function weighted_bf_cross_section_TOPBase(λ_vals, T, species_name;
+                                           elec_conf_table = nothing,
+                                           cross_sec_file::Union{AbstractString,Nothing} = nothing,
+                                           convert_to_cm2::Bool = false,
+                                           partition_func = nothing)
+
+    # make extapolation-handling a choice
+    # make it possible to handle multiple temperatures at once
+    # make it possible to pass in a dict mapping dict names to the various energy levels?
+    # maybe also allow the user to specify an ionization energy level
+
+    # determine output units:
+    units_factor = convert_to_cm2 ? 1e-18 : 1.0; # 1 megabarn = 1e-18 cm²
+
+    # precompute Temperature-dependent constant
+    if isnothing(partition_func)
+        inv_partition_func_val = 1.0/Korg.partition_funcs[species_name](T)
+    else
+        inv_partition_func_val = 1.0/partition_func(T)
+    end
 
     β_Ryd = Korg.RydbergH_eV/(Korg.kboltz_eV * T)
 
-    total_weight = 0.0
+    # convert λ_vals to photon energies
+    photon_energies = (Korg.hplanck_eV * Korg.c_cgs * 1.0e8) ./ λ_vals ./ Korg.RydbergH_eV
 
-    itr = each_photo_ion_subtable(photo_ion_file)
+    # prepare the output array where results will be accumulated
+    weighted_average = zeros(eltype(photon_energies), size(photon_energies))
+
+    # prepare the last few items before entering the loop
+    state_prop_dict,itr = _get_tabulated_data(species_name)
+
     i = 0
     for (species, state_id, table_photon_energy_ryd, table_cross_section_MBarn) in itr
         i+=1
@@ -258,94 +464,30 @@ function _OP_bf_tabulated_cross_section(λ_vals, T, species_name)
             continue
         end
 
-        if species_name in ["He_I", "C_I", "C_II", "Al_II", "O_II"]
-            # In a couple tables, there's a place where the photon energy is listed out of order
-            # This seems to be okay given that this is in a section of the table where the
-            # cross-section is zero.
-            for j in 1:length(table_photon_energy_ryd)-1
-                if table_photon_energy_ryd[j+1] < table_photon_energy_ryd[j]
-                    @assert j > 1
-                    @assert (j + 2) <= length(table_photon_energy_ryd)
-                    @assert table_photon_energy_ryd[j+2] >= table_photon_energy_ryd[j+1]
-                    @assert table_photon_energy_ryd[j+2] >= table_photon_energy_ryd[j]
-                    @assert table_photon_energy_ryd[j+1] >= table_photon_energy_ryd[j-1]
-                    @assert table_photon_energy_ryd[j] >= table_photon_energy_ryd[j-1]
+        # construct an interpolator from the subtable
+        func = _interpolator_from_subtable(table_photon_energy_ryd, table_cross_section_MBarn,
+                                           species_name)
 
-                    @assert table_cross_section_MBarn[j+2] == 0.0
-                    @assert table_cross_section_MBarn[j+1] == 0.0
-                    @assert table_cross_section_MBarn[j] == 0.0
-                    @assert table_cross_section_MBarn[j-1] == 0.0
+        # retrieve the excitation energy (energy relative to ground state) and statistical weight
+        state_prop = state_prop_dict[state_id]
+        statistical_weight = state_prop.statistical_weight
+        energy_ryd = abs(state_prop.excitation_potential_ryd)
 
-                    # swap the order of the 2 values
-                    temp = table_photon_energy_ryd[j]
-                    table_photon_energy_ryd[j] = table_photon_energy_ryd[j+1]
-                    table_photon_energy_ryd[j+1] = temp
-                end
-            end
-        end
-
-        func = LinearInterpolation(table_photon_energy_ryd, table_cross_section_MBarn,
-                                   extrapolation_bc=0.0)
-        tmp = data_dict[state_id]
-        statistical_weight = tmp.statistical_weight
-        energy_ryd = abs(tmp.excitation_potential_ryd)
-
+        # now compute the weighting of the current state under LTE
         weight = inv_partition_func_val*statistical_weight * exp(-energy_ryd * β_Ryd)
 
-        total_weight += weight
-
-        current_cross_section = func.(photon_energies) .* (1.0 .- exp.(-photon_energies.*β_Ryd))
+        current_cross_section = (func.(photon_energies) .* (1.0 .- exp.(-photon_energies.*β_Ryd))
+                                 .* units_factor)
         weighted_average .+= (current_cross_section .* weight)
     end
     weighted_average
 end
 
-# Need to standardize some tests and delete all of the following:
 
+function absorption_coef_bf_TOPBase(λ_vals, T, ndens_species, species_name)
 
-using Plots
+end
 
-T = 5000.0
-λ_vals = map((λ) -> Float32(λ), 100:1.0:40000)
-
-H_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "H_I")
-
-He_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "He_I")
-He_II_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "He_II")
-
-C_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "C_I")
-C_II_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "C_II")
-
-N_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "N_I")
-N_II_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "N_II")
-
-O_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "O_I")
-O_II_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "O_II")
-
-Mg_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "Mg_I")
-Mg_II_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "Mg_II")
-
-Al_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "Al_I")
-Al_II_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "Al_II")
-
-Si_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "Si_I")
-Si_II_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "Si_II")
-
-Ca_I_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "Ca_I")
-Ca_II_opacity = _OP_bf_tabulated_cross_section(λ_vals, T, "Ca_II")
-
-p = plot(λ_vals, [H_I_opacity,
-                  He_I_opacity, He_II_opacity,
-                  C_I_opacity, C_II_opacity,
-                  N_I_opacity, N_II_opacity,
-                  O_I_opacity, O_II_opacity,
-                  Mg_I_opacity, Mg_II_opacity,
-                  Al_I_opacity, Al_II_opacity,
-                  Si_I_opacity, Si_II_opacity,
-                  Ca_I_opacity, Ca_II_opacity],
-         labels = ["H I" "He I" "He II" "C I" "C II" "N I" "N II" "O I" "O II" "Mg I" "Mg II" "Al I" "Al II" "Si I" "Si II" "Ca I" "Ca II"],
-         ylim = [0.0001, 80], yscale = :log10, xlim = [0, 1e4])
-
-gui()
-
-
+function opacity_bf_TOPBase(λ_vals, T_vals, ndens_species, ρ, species_name)
+    absorption_coef_TOPBase_bf(λ_vals, T_vals, ndens_species, species_name)/ρ
+end
