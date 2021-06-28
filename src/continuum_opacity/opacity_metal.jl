@@ -390,7 +390,7 @@ end
 
 
 @doc raw"""
-    weighted_bf_cross_section_TOPBase(λ, T, species_name; convert_to_cm2 = false,
+    weighted_bf_cross_section_TOPBase(λ_vals, T_vals, species_name; convert_to_cm2 = false,
                                       partition_func = nothing, extrapolation_bc = 0.0)
 
 Calculate the combined bound-free cross section of an ion species using data from the Opacity
@@ -398,9 +398,11 @@ Project. The result includes contributions from all (provided) energy states, we
 Boltzmann distribution, and includes the LTE correction for for stimulated emission.
 
 # Arguments
-- `λ`: a scalar or an iterable collection of wavelengths (in Å) to compute the cross sections at
-- `T`: a scalar Temperature in K or a collection of temperatures
+- `λ_vals`: an iterable collection of wavelengths (in Å) to compute the cross sections at
+- `T_vals`: an iterable collection of temperatures (in K) to compute the cross sections at
 - `species_name`: name of the ion species
+
+# Keyword Arguments
 - `convert_to_cm2`: When True, returns the weighted cross section in units of cm². Otherwise, the
   results have units of megabarnes. Default is False.
 - `partition_func`: Specifies the partition function for the current species. This should be a
@@ -428,27 +430,17 @@ Under the assumption of LTE, the linear aborption coefficient for bound-free abs
 # Notes
 In the future, it needs to be possible to pass an argument that adjusts .
 """
-function weighted_bf_cross_section_TOPBase(λ, T, species_name;
+function weighted_bf_cross_section_TOPBase(λ_vals, T_vals, species_name;
                                            elec_conf_table = nothing,
                                            cross_sec_file::Union{AbstractString,Nothing} = nothing,
                                            convert_to_cm2::Bool = false, partition_func = nothing,
                                            extrapolation_bc=0.0)
 
-    
-
     # make it possible to pass in a dict mapping dict names to the various energy levels?
     # maybe also allow the user to specify an ionization energy level
 
-    
-    # It probably makes sense to force λ and T to be arrays in this function and then do this
-    # coercion between scalars and arrays at a higher level (i.e. when computing absorption coefs)
-    @assert (ndims(λ) <= 1) & (ndims(T) <= 1)
-
-    λ_vals = ndims(λ) == 0 ? Vector{typeof(λ)}(λ,1) : λ
-    scalar_λ_vals = ndims(λ) == 0
-    T_vals = ndims(T) == 0 ? Vector{typeof(T)}(T,1) : T
-    scalar_T_vals = ndims(T) == 0
-
+    @assert ndims(λ_vals) == 1
+    @assert ndims(T_vals) == 1
 
     # determine output units:
     units_factor = convert_to_cm2 ? 1e-18 : 1.0; # 1 megabarn = 1e-18 cm²
@@ -466,7 +458,7 @@ function weighted_bf_cross_section_TOPBase(λ, T, species_name;
     photon_energies = (Korg.hplanck_eV * Korg.c_cgs * 1.0e8) ./ λ_vals ./ Korg.RydbergH_eV
 
     # prepare the output array where results will be accumulated
-    weighted_average = zeros(eltype(photon_energies), (size(photon_energies),size(T_vals)))
+    weighted_average = zeros(eltype(photon_energies), (length(photon_energies),length(T_vals)))
 
     # prepare the last few items before entering the loop
     state_prop_dict,itr = _get_tabulated_data(species_name)
@@ -488,7 +480,7 @@ function weighted_bf_cross_section_TOPBase(λ, T, species_name;
         energy_ryd = abs(state_prop.excitation_potential_ryd)
 
         # now iterate over Temperatures
-        for j in 1:size(T_vals)
+        for j in 1:length(T_vals)
 
             # now compute the weighting of the current state under LTE
             weight = inv_partition_func_val[j] * statistical_weight * exp(-energy_ryd * β_Ryd[j])
@@ -500,22 +492,70 @@ function weighted_bf_cross_section_TOPBase(λ, T, species_name;
         end
     end
 
-    if scalar_λ_vals && scalar_T_vals
-        weighted_average[1,1]
-    elseif scalar_λ_vals
-        weighted_average[1,:]
-    elseif scalar_T_vals
-        weighted_average[:,1]
-    else
-        weighted_average
+    weighted_average
+end
+
+
+
+"""
+    absorption_coef_bf_TOPBase(λ, T, ndens_species, species_name; kwargs...)
+
+Computes the bound-free linear absorption coefficient, α, (in units of cm⁻¹) using data from the 
+Opacity Project (downloaded from TOPBase) and assuming LTE.
+
+# Arguments
+- `λ`: a scalar wavelength or an iterable collection of wavelengths to compute α at. This should 
+  have units of ångstroms.
+- `T`: a scalar temperature or an iterable collection of temperatures to compute α at. This should 
+  have units of Kelvin.
+- `ndens_species`: The number density of the species at each temperature (specified with units of
+  cm⁻³). If `T` is a scalar, this should also be a scalar while if `T` is an iterable collection,
+  this should have the same shape as `T`.
+- `species_name`: name of the ion species
+
+# Keyword Arguments
+This function accepts all the same keyword arguments as `weighted_bf_cross_section_TOPBase`, except
+for `convert_to_cm2`.
+"""
+function absorption_coef_bf_TOPBase(λ, T, ndens_species, species_name;
+                                    kwargs...)
+
+    for kwarg in keys(kwargs)
+        if kwarg == :convert_to_cm2
+            throw(ArgumentError(
+                "absorption_coef_bf_TOPBase doesn't accept the convert_to_cm2 keyword argument"
+            ))
+        end
     end
-end
 
+    # the performance page of the Julia manual documents a design pattern with multiple dispatch
+    # that could probably be used to acheive better performance
+    @assert (ndims(λ) <= 1) & (ndims(T) <= 1)
+    λ_vals = ndims(λ) == 0 ? typeof(λ)[λ] : λ
 
-function absorption_coef_bf_TOPBase(λ_vals, T, ndens_species, species_name)
+    @assert size(T) == size(ndens_species)
+    (T_vals, ndens_species_vals) = if ndims(T) == 0
+        (typeof(T)[T],                          # 1 element array holding T
+         typeof(ndens_species)[ndens_species])  # 1 element array holding ndens_species
+    else
+        (T, ndens_species)
+    end
 
-end
+    cross_sections = weighted_bf_cross_section_TOPBase(λ_vals, T_vals, species_name;
+                                                       convert_to_cm2 = true, kwargs...)
 
-function opacity_bf_TOPBase(λ_vals, T_vals, ndens_species, ρ, species_name)
-    absorption_coef_TOPBase_bf(λ_vals, T_vals, ndens_species, species_name)/ρ
+    α = Array{eltype(cross_sections),2}(undef, size(cross_sections))
+    for (i,n) in enumerate(ndens_species_vals)
+        view(α,:,i) .= n .* view(cross_sections,:,i)
+    end
+
+    if ndims(λ) == 0 && ndims(T) == 0
+        α[1,1]
+    elseif ndims(λ) == 0
+        α[1,:]
+    elseif ndims(T) == 0
+        α[:,1]
+    else
+        α
+    end
 end
