@@ -315,7 +315,8 @@ Base.IteratorSize(::Type{<:EachPhotoIonSubtable}) = SizeUnknown()
 
 function _interpolator_from_subtable(table_photon_energy_ryd::Vector{Float32},
                                      table_cross_section_MBarn::Vector{Float32},
-                                     species_name::Union{AbstractString,Nothing} = nothing)
+                                     species_name::Union{AbstractString,Nothing} = nothing,
+                                     extrapolation_bc = 0.0)
     if species_name in ["He_I", "C_I", "C_II", "Al_II", "O_II"]
         # In a couple tables, there's a place where the photon energy is listed out of order
         # This seems to be okay given that this is in a section of the table where the
@@ -342,7 +343,7 @@ function _interpolator_from_subtable(table_photon_energy_ryd::Vector{Float32},
         end
     end
     LinearInterpolation(table_photon_energy_ryd, table_cross_section_MBarn,
-                        extrapolation_bc=0.0)
+                        extrapolation_bc=extrapolation_bc)
 end
 
 function _get_tabulated_data(species_name, elec_conf_table = nothing,
@@ -389,22 +390,24 @@ end
 
 
 @doc raw"""
-    weighted_bf_cross_section_TOPBase(λ_vals, T, species_name; convert_to_cm2 = false,
-                                      partition_func = nothing)
+    weighted_bf_cross_section_TOPBase(λ, T, species_name; convert_to_cm2 = false,
+                                      partition_func = nothing, extrapolation_bc = 0.0)
 
 Calculate the combined bound-free cross section of an ion species using data from the Opacity
 Project. The result includes contributions from all (provided) energy states, weighted by the
 Boltzmann distribution, and includes the LTE correction for for stimulated emission.
 
 # Arguments
-- `λ_vals`: an iterable collection of wavelengths (in Å) to compute the cross sections at
-- `T`: Temperature in K
+- `λ`: a scalar or an iterable collection of wavelengths (in Å) to compute the cross sections at
+- `T`: a scalar Temperature in K or a collection of temperatures
 - `species_name`: name of the ion species
 - `convert_to_cm2`: When True, returns the weighted cross section in units of cm². Otherwise, the
   results have units of megabarnes. Default is False.
 - `partition_func`: Specifies the partition function for the current species. This should be a
   callable that accepts Temperature as an argument. When this is `nothing`, it falls back to the
   default partition functions.
+- `extrapolation_bc`: Specifies handling of extrapolation during linear interpolation (this is
+  passed to Interpolation.LinearInterpolation.
 
 # Explanation
 In more mathematical rigor, this function basically evaluates the following equation:
@@ -425,34 +428,45 @@ Under the assumption of LTE, the linear aborption coefficient for bound-free abs
 # Notes
 In the future, it needs to be possible to pass an argument that adjusts .
 """
-function weighted_bf_cross_section_TOPBase(λ_vals, T, species_name;
+function weighted_bf_cross_section_TOPBase(λ, T, species_name;
                                            elec_conf_table = nothing,
                                            cross_sec_file::Union{AbstractString,Nothing} = nothing,
-                                           convert_to_cm2::Bool = false,
-                                           partition_func = nothing)
+                                           convert_to_cm2::Bool = false, partition_func = nothing,
+                                           extrapolation_bc=0.0)
 
-    # make extapolation-handling a choice
-    # make it possible to handle multiple temperatures at once
+    
+
     # make it possible to pass in a dict mapping dict names to the various energy levels?
     # maybe also allow the user to specify an ionization energy level
+
+    
+    # It probably makes sense to force λ and T to be arrays in this function and then do this
+    # coercion between scalars and arrays at a higher level (i.e. when computing absorption coefs)
+    @assert (ndims(λ) <= 1) & (ndims(T) <= 1)
+
+    λ_vals = ndims(λ) == 0 ? Vector{typeof(λ)}(λ,1) : λ
+    scalar_λ_vals = ndims(λ) == 0
+    T_vals = ndims(T) == 0 ? Vector{typeof(T)}(T,1) : T
+    scalar_T_vals = ndims(T) == 0
+
 
     # determine output units:
     units_factor = convert_to_cm2 ? 1e-18 : 1.0; # 1 megabarn = 1e-18 cm²
 
     # precompute Temperature-dependent constant
-    if isnothing(partition_func)
-        inv_partition_func_val = 1.0/Korg.partition_funcs[species_name](T)
+    inv_partition_func_val = if isnothing(partition_func)
+        1.0./Korg.partition_funcs[species_name].(T_vals)
     else
-        inv_partition_func_val = 1.0/partition_func(T)
+        1.0./partition_func.(T_vals)
     end
 
-    β_Ryd = Korg.RydbergH_eV/(Korg.kboltz_eV * T)
+    β_Ryd = Korg.RydbergH_eV./(Korg.kboltz_eV .* T_vals)
 
     # convert λ_vals to photon energies
     photon_energies = (Korg.hplanck_eV * Korg.c_cgs * 1.0e8) ./ λ_vals ./ Korg.RydbergH_eV
 
     # prepare the output array where results will be accumulated
-    weighted_average = zeros(eltype(photon_energies), size(photon_energies))
+    weighted_average = zeros(eltype(photon_energies), (size(photon_energies),size(T_vals)))
 
     # prepare the last few items before entering the loop
     state_prop_dict,itr = _get_tabulated_data(species_name)
@@ -466,21 +480,35 @@ function weighted_bf_cross_section_TOPBase(λ_vals, T, species_name;
 
         # construct an interpolator from the subtable
         func = _interpolator_from_subtable(table_photon_energy_ryd, table_cross_section_MBarn,
-                                           species_name)
+                                           species_name, extrapolation_bc)
 
         # retrieve the excitation energy (energy relative to ground state) and statistical weight
         state_prop = state_prop_dict[state_id]
         statistical_weight = state_prop.statistical_weight
         energy_ryd = abs(state_prop.excitation_potential_ryd)
 
-        # now compute the weighting of the current state under LTE
-        weight = inv_partition_func_val*statistical_weight * exp(-energy_ryd * β_Ryd)
+        # now iterate over Temperatures
+        for j in 1:size(T_vals)
 
-        current_cross_section = (func.(photon_energies) .* (1.0 .- exp.(-photon_energies.*β_Ryd))
-                                 .* units_factor)
-        weighted_average .+= (current_cross_section .* weight)
+            # now compute the weighting of the current state under LTE
+            weight = inv_partition_func_val[j] * statistical_weight * exp(-energy_ryd * β_Ryd[j])
+
+            current_cross_section = (func.(photon_energies) .*
+                                     (1.0 .- exp.(-photon_energies.*β_Ryd[j]))
+                                     .* units_factor)
+            view(weighted_average, :, j) .+= (current_cross_section .* weight)
+        end
     end
-    weighted_average
+
+    if scalar_λ_vals && scalar_T_vals
+        weighted_average[1,1]
+    elseif scalar_λ_vals
+        weighted_average[1,:]
+    elseif scalar_T_vals
+        weighted_average[:,1]
+    else
+        weighted_average
+    end
 end
 
 
