@@ -1,7 +1,7 @@
 # the only reason that we NEED to load in the electron_configurations data is that it's not
-# completely clear to me exactly how I would compute certain quantities (i.e. the statistical weight and the ground state energy)
+# completely clear to me exactly how I would compute certain quantities (i.e. the statistical
+# weight and the ground state energy)
 
-include("../Korg.jl")
 using Base
 using Interpolations
 # import Korg.partition_funcs, Korg.atomic_symbols, Korg.numerals, and constants
@@ -94,7 +94,7 @@ function _parse_Z_numelectrons_stateid(str::AbstractString, start_Z::Integer,
 end
 
 _get_species_string(atomic_num::Integer, num_electrons::Integer) =
-    Korg.atomic_symbols[atomic_num] * "_" * Korg.numerals[atomic_num-num_electrons+1]
+    atomic_symbols[atomic_num] * "_" * numerals[atomic_num-num_electrons+1]
 
 
 # Functionallity for reading tables of electron configuration data
@@ -354,13 +354,13 @@ function _get_tabulated_data(species_name, elec_conf_table = nothing,
     @assert length(split_name) == 2
     element_name = split_name[1]
     ion_state = split_name[2]
-    @assert ion_state in Korg.numerals
+    @assert ion_state in numerals
 
     # find electron configuration dict:
     my_elec_config_file = if isnothing(elec_conf_table)
         # look at environment variable KORG_OP_ELECTRON_CONFIG_DIR
         println("Searching for electron_config_file in KORG_OP_ELECTRON_CONFIG_DIR")
-        joinpath(Korg._data_dir,
+        joinpath(_data_dir,
                  string("TOPbase/electron_config/", element_name, ".txt"))
     else
         elec_conf_table
@@ -379,7 +379,7 @@ function _get_tabulated_data(species_name, elec_conf_table = nothing,
 
     # get the photo-ionization subtable iterator:
     my_cross_sec_file = if isnothing(cross_sec_file)
-        joinpath(Korg._data_dir,
+        joinpath(_data_dir,
                  string("TOPbase/cross_sections/", species_name, ".txt"))
     else
         cross_sec_file
@@ -447,15 +447,15 @@ function weighted_bf_cross_section_TOPBase(λ_vals, T_vals, species_name;
 
     # precompute Temperature-dependent constant
     inv_partition_func_val = if isnothing(partition_func)
-        1.0./Korg.partition_funcs[species_name].(T_vals)
+        1.0./partition_funcs[species_name].(T_vals)
     else
         1.0./partition_func.(T_vals)
     end
 
-    β_Ryd = Korg.RydbergH_eV./(Korg.kboltz_eV .* T_vals)
+    β_Ryd = RydbergH_eV./(kboltz_eV .* T_vals)
 
     # convert λ_vals to photon energies
-    photon_energies = (Korg.hplanck_eV * Korg.c_cgs * 1.0e8) ./ λ_vals ./ Korg.RydbergH_eV
+    photon_energies = (hplanck_eV * c_cgs * 1.0e8) ./ λ_vals ./ RydbergH_eV
 
     # prepare the output array where results will be accumulated
     weighted_average = zeros(eltype(photon_energies), (length(photon_energies),length(T_vals)))
