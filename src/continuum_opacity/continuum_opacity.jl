@@ -12,6 +12,11 @@ include("opacity_H.jl")
 export He_II_bf, He_II_ff, Heminus_ff
 include("opacity_He.jl")
 
+using ..Korg: atomic_symbols, numerals, partition_funcs, _data_dir # not sure that this is the
+                                                                   # best idea
+export absorption_coef_bf_TOPBase
+include("opacity_metal.jl")
+
 
 """
     electron_scattering(nₑ, ρ)
