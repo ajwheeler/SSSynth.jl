@@ -128,18 +128,6 @@ function synthesize(atm::ModelAtmosphere, linelist, A_X::Vector{<:Real},
         throw(ArgumentError("wl_ranges must be sorted and non-overlapping"))
     end
 
-    # wavelenths at which to calculate the continuum
-    cntm_wl_ranges = map(wl_ranges) do λs 
-        collect((λs[1] - line_buffer - cntm_step) : cntm_step : (λs[end] + line_buffer + cntm_step))
-    end
-    # eliminate portions where ranges overlap.  One fitting is merged, there will be functions for this.
-    for i in 1:length(cntm_wl_ranges)-1 
-        cntm_wl_ranges[i] = cntm_wl_ranges[i][cntm_wl_ranges[i] .< first(cntm_wl_ranges[i+1])]
-    end
-    cntmλs = vcat(cntm_wl_ranges...)
-    # frequencies at which to calculate the continuum, as a single vector
-    sorted_cntmνs = c_cgs ./ reverse(cntmλs) 
-
     #sort the lines if necessary
     issorted(linelist; by=l->l.wl) || sort!(linelist, by=l->l.wl)
     #discard lines far from the wavelength range being synthesized
@@ -164,42 +152,41 @@ function synthesize(atm::ModelAtmosphere, linelist, A_X::Vector{<:Real},
     # each layer's absorption at reference λ (5000 Å)
     # This isn't used with bezier radiative transfer.
     α5 = Vector{α_type}(undef, length(atm.layers)) 
-    triples = map(enumerate(atm.layers)) do (i, layer)
+
+    pairs = map(enumerate(atm.layers)) do (i, layer)
         nₑ, n_dict = chemical_equilibrium(layer.temp, layer.number_density, 
                                           layer.electron_number_density, 
                                           abs_abundances, ionization_energies, 
                                           partition_funcs, log_equilibrium_constants; 
                                           electron_number_density_warn_threshold=electron_number_density_warn_threshold)
-
-        α_cntm_vals = reverse(total_continuum_absorption(sorted_cntmνs, layer.temp, nₑ, n_dict, 
-                                                         partition_funcs))
-        α_cntm_layer = LinearInterpolation(cntmλs, α_cntm_vals)
-        α[i, :] .= α_cntm_layer.(all_λs)
-
         if ! bezier_radiative_transfer
             α5[i] = total_continuum_absorption([c_cgs/5e-5], layer.temp, nₑ, n_dict, partition_funcs)[1]
         end
+        nₑ, n_dict
+    end
+    nₑs = first.(pairs)
+    #put number densities in a dict of vectors, rather than a vector of dicts.
+    n_dicts = last.(pairs)
+    number_densities = Dict([spec=>[n[spec] for n in n_dicts] for spec in keys(n_dicts[1]) 
+                             if spec != species"H III"])
 
-        if hydrogen_lines
+    # write cntm to α and get a vector of continuum absorption interpolators
+    α_cntm_itps = cntm_absorption!(α, wl_ranges, cntm_step, atm, nₑs, n_dicts, partition_funcs, 
+                                   line_buffer)
+
+    if hydrogen_lines
+        for (i, layer, nₑ, n_dict) in zip(1:length(nₑs), atm.layers, nₑs, n_dicts)
             hydrogen_line_absorption!(view(α, i, :), wl_ranges, layer.temp, nₑ,
                                       n_dict[species"H_I"],  n_dict[species"He I"],
                                       partition_funcs[species"H_I"](log(layer.temp)), vmic*1e5, 
                                       hydrogen_line_window_size*1e-8; 
                                       use_MHD=use_MHD_for_hydrogen_lines)
         end
-
-        nₑ, n_dict, α_cntm_layer
     end
-    nₑs = first.(triples)
-    #put number densities in a dict of vectors, rather than a vector of dicts.
-    n_dicts = getindex.(triples, 2)
-    number_densities = Dict([spec=>[n[spec] for n in n_dicts] for spec in keys(n_dicts[1]) 
-                             if spec != species"H III"])
-    #vector of continuum-absorption interpolators
-    α_cntm = last.(triples) 
 
     line_absorption!(α, linelist, wl_ranges, [layer.temp for layer in atm.layers], nₑs,
-        number_densities, partition_funcs, vmic*1e5, α_cntm, cutoff_threshold=line_cutoff_threshold)
+        number_densities, partition_funcs, vmic*1e5, α_cntm_itps, 
+        cutoff_threshold=line_cutoff_threshold)
     
     source_fn = blackbody.((l->l.temp).(atm.layers), all_λs')
     flux, intensity = if bezier_radiative_transfer
@@ -352,4 +339,34 @@ function blackbody(T, λ)
     k = kboltz_cgs
 
     2*h*c^2/λ^5 * 1/(exp(h*c/λ/k/T) - 1)
+end
+
+
+"""
+     record_cntm_absorption!(α, wl_ranges, cntm_step, atm, nₑs, n_dicts, partition_funcs, buffer)
+
+Writes the continuum absorption coefficient to `α` and returns a vector of interpolators.
+This is a helper function for [`synthesize`](@ref).
+"""
+function cntm_absorption!(α, wl_ranges, cntm_step, atm, nₑs, n_dicts, partition_funcs, buffer)
+    # wavelenths at which to calculate the continuum
+    cntm_wl_ranges = map(wl_ranges) do λs 
+        collect((λs[1] - buffer - cntm_step) : cntm_step : (λs[end] + buffer + cntm_step))
+    end
+    # eliminate portions where ranges overlap.  One fitting is merged, there will be functions for this.
+    for i in 1:length(cntm_wl_ranges)-1 
+        cntm_wl_ranges[i] = cntm_wl_ranges[i][cntm_wl_ranges[i] .< first(cntm_wl_ranges[i+1])]
+    end
+    cntmλs = vcat(cntm_wl_ranges...)
+
+    # frequencies at which to calculate the continuum, as a single vector
+    sorted_cntmνs = c_cgs ./ reverse(cntmλs) 
+
+    map(1:length(atm.layers), atm.layers, nₑs, n_dicts) do i, layer, nₑ, n_dict
+        α_cntm_vals = reverse(total_continuum_absorption(sorted_cntmνs, layer.temp, nₑ, n_dict, 
+                                                        partition_funcs))
+        α_cntm_layer = LinearInterpolation(cntmλs, α_cntm_vals)   
+        α[i, :] .= α_cntm_layer.(vcat(wl_ranges...))
+        α_cntm_layer
+    end
 end
