@@ -96,7 +96,8 @@ function synthesize(atm::ModelAtmosphere, linelist, A_X::Vector{<:Real},
                     electron_number_density_warn_threshold=0.25,
                     bezier_radiative_transfer=false, ionization_energies=ionization_energies, 
                     partition_funcs=default_partition_funcs, 
-                    log_equilibrium_constants=default_log_equilibrium_constants)
+                    log_equilibrium_constants=default_log_equilibrium_constants,
+                    _alpha_cntm_itps=nothing, _nes=nothing, _number_densities=nothing)
 
     # Convert air to vacuum wavelenths if necessary.
     if air_wavelengths
@@ -153,13 +154,34 @@ function synthesize(atm::ModelAtmosphere, linelist, A_X::Vector{<:Real},
     # This isn't used with bezier radiative transfer.
     α5 = Vector{α_type}(undef, length(atm.layers)) 
 
-    nₑs, n_dicts =  each_layer_chemical_equillibrium(atm, abs_abundances, ionization_energies, 
-                                                     partition_funcs, log_equilibrium_constants, 
-                                                     electron_number_density_warn_threshold)
+    # get (or grab from kwargs) the chemical equillibrium solution
+    # n_dicts is a vector of dicts, and number_densities is the corresponding dict of vectors
+    nₑs, n_dicts, number_densities = if isnothing(_nes)
+        @assert isnothing(_number_densities)
+        nₑs, n_dicts = each_layer_chemical_equillibrium(atm, abs_abundances, ionization_energies, 
+                                                        partition_funcs, log_equilibrium_constants, 
+                                                        electron_number_density_warn_threshold)
+        # array of dicts to dict of arrays
+        number_densities = Dict([spec=>[n[spec] for n in n_dicts] for spec in keys(n_dicts[1]) 
+                                 if spec != species"H III"])
+        nₑs, n_dicts, number_densities
+    else # use values passed in as keyword arguments
+        @assert !isnothing(_number_densities)
+        n_dicts = map(eachindex(_number_densities[species"H I"])) do i
+            Dict(spec => _number_densities[spec][i] for spec in keys(_number_densities))
+        end
+        _nes, n_dicts, _number_densities
+    end
 
-    # write cntm to α and get a vector of continuum absorption interpolators
-    α_cntm_itps = cntm_absorption!(α, wl_ranges, cntm_step, atm, nₑs, n_dicts, partition_funcs, 
-                                   line_buffer)
+    # get vector of continuum absorption interpolators and use them to fill α
+    α_cntm_itps = if isnothing(_alpha_cntm_itps)
+        cntm_absorption_itps(wl_ranges, cntm_step, atm, nₑs, n_dicts, partition_funcs, line_buffer)
+    else
+        _alpha_cntm_itps
+    end
+    for (i, α_cntm) in enumerate(α_cntm_itps)
+        α[i, :] .= α_cntm(all_λs)
+    end
 
     if !bezier_radiative_transfer
         for (i, layer, nₑ, n_dict) in zip(1:length(nₑs), atm.layers, nₑs, n_dicts)
@@ -177,9 +199,6 @@ function synthesize(atm::ModelAtmosphere, linelist, A_X::Vector{<:Real},
         end
     end
 
-    # array of dicts to dict of arrays
-    number_densities = Dict([spec=>[n[spec] for n in n_dicts] for spec in keys(n_dicts[1]) 
-                             if spec != species"H III"])
     line_absorption!(α, linelist, wl_ranges, [layer.temp for layer in atm.layers], nₑs,
         number_densities, partition_funcs, vmic*1e5, α_cntm_itps, 
         cutoff_threshold=line_cutoff_threshold)
@@ -201,7 +220,8 @@ function synthesize(atm::ModelAtmosphere, linelist, A_X::Vector{<:Real},
     end
 
     (flux=flux, intensity=intensity, alpha=α, number_densities=number_densities, 
-    electron_number_density=nₑs, wavelengths=all_λs.*1e8, subspectra=subspectra)
+    electron_number_density=nₑs, wavelengths=all_λs.*1e8, subspectra=subspectra, 
+    alpha_cntm_itps=α_cntm_itps)
 end
 
 """
@@ -364,7 +384,7 @@ end
 Writes the continuum absorption coefficient to `α` and returns a vector of interpolators.
 This is a helper function for [`synthesize`](@ref).
 """
-function cntm_absorption!(α, wl_ranges, cntm_step, atm, nₑs, n_dicts, partition_funcs, buffer)
+function cntm_absorption_itps(wl_ranges, cntm_step, atm, nₑs, n_dicts, partition_funcs, buffer)
     # wavelenths at which to calculate the continuum
     cntm_wl_ranges = map(wl_ranges) do λs 
         collect((λs[1] - buffer - cntm_step) : cntm_step : (λs[end] + buffer + cntm_step))
@@ -381,8 +401,6 @@ function cntm_absorption!(α, wl_ranges, cntm_step, atm, nₑs, n_dicts, partiti
     map(1:length(atm.layers), atm.layers, nₑs, n_dicts) do i, layer, nₑ, n_dict
         α_cntm_vals = reverse(total_continuum_absorption(sorted_cntmνs, layer.temp, nₑ, n_dict, 
                                                         partition_funcs))
-        α_cntm_layer = LinearInterpolation(cntmλs, α_cntm_vals)   
-        α[i, :] .= α_cntm_layer.(vcat(wl_ranges...))
-        α_cntm_layer
+        LinearInterpolation(cntmλs, α_cntm_vals)   
     end
 end
