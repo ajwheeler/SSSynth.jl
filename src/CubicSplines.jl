@@ -51,7 +51,6 @@ function CubicSpline(t,u; extrapolate=false)
     if length(t) != length(Set(t))
         throw(ArgumentError("t values must be unique. Can't construct interpolator."))
     end
-    display([t u])
     n = length(t) - 1
     h = vcat(0, map(k -> t[k+1] - t[k], 1:length(t)-1), 0)
     dl = h[2:n+1]
