@@ -27,6 +27,10 @@ function fit_EWs(atm::ModelAtmosphere, linelist, A_X, EWs; abundance_grid=-2:0.1
     subspectra = sol.subspectra
     cntm_alpha = sol.alpha_cntm_itps
 
+    cntm_sol = synthesize(atm, [], A_X, windows, hydrogen_lines=false, 
+                         _alpha_cntm_itps=cntm_alpha, _nes=nₑs, _number_densities=number_densities, 
+                         synthesize_kwargs...)
+
     absorptions = map(abundance_grid) do X_H
         A_X[element] = solar_abundances[element] + X_H
 
@@ -40,9 +44,6 @@ function fit_EWs(atm::ModelAtmosphere, linelist, A_X, EWs; abundance_grid=-2:0.1
         sol = synthesize(atm, linelist, A_X, windows, hydrogen_lines=false, line_buffer=0.0,
                          _alpha_cntm_itps=cntm_alpha, _nes=nₑs, _number_densities=ns, 
                          synthesize_kwargs...)
-        cntm_sol = synthesize(atm, [], A_X, windows, hydrogen_lines=false, line_buffer=0.0,
-                             _alpha_cntm_itps=cntm_alpha, _nes=nₑs, _number_densities=ns, 
-                             synthesize_kwargs...)
         1 .- sol.flux ./ cntm_sol.flux
     end
 
