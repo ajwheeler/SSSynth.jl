@@ -337,6 +337,13 @@ function blackbody(T, λ)
     2*h*c^2/λ^5 * 1/(exp(h*c/λ/k/T) - 1)
 end
 
+"""
+    each_layer_chemical_equillibrium(atm, abs_abundances, ionization_energies, partition_funcs, 
+                                     log_equilibrium_constants; kwargs...)
+
+Calculate the electron number density and number densities of all species in chemical equilibrium 
+for each layer of the atmosphere. Helper function for [`synthesize`](@ref).
+"""
 function each_layer_chemical_equillibrium(atm, abs_abundances, ionization_energies, partition_funcs, 
                                           log_equilibrium_constants, electron_number_density_warn_threshold)
     pairs = map(atm.layers) do layer
