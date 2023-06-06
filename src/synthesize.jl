@@ -141,16 +141,9 @@ function synthesize(atm::ModelAtmosphere, linelist, A_X::Vector{<:Real},
         end |> any
     end
 
-    if length(A_X) != MAX_ATOMIC_NUMBER || (A_X[1] != 12)
-        throw(ArgumentError("A(H) must be a 92-element vector with A[1] == 12."))
-    end
-
-    abs_abundances = @. 10^(A_X - 12) # n(X) / n_tot
-    abs_abundances ./= sum(abs_abundances) #normalize so that sum(n(X)/n_tot) = 1
-
     #float-like type general to handle dual numbers
     α_type = typeof(promote(atm.layers[1].temp, length(linelist) > 0 ? linelist[1].wl : 1.0, 
-                            all_λs[1], vmic, abs_abundances[1])[1])
+                            all_λs[1], vmic, A_X[1])[1])
     #the absorption coefficient, α, for each wavelength and atmospheric layer
     α = Matrix{α_type}(undef, length(atm.layers), length(all_λs))
     # each layer's absorption at reference λ (5000 Å)
@@ -161,7 +154,7 @@ function synthesize(atm::ModelAtmosphere, linelist, A_X::Vector{<:Real},
     # n_dicts is a vector of dicts, and number_densities is the corresponding dict of vectors
     nₑs, n_dicts, number_densities = if isnothing(_nes)
         @assert isnothing(_number_densities)
-        nₑs, n_dicts = each_layer_chemical_equillibrium(atm, abs_abundances, ionization_energies, 
+        nₑs, n_dicts = each_layer_chemical_equillibrium(atm, A_X, ionization_energies, 
                                                         partition_funcs, log_equilibrium_constants, 
                                                         electron_number_density_warn_threshold)
         # array of dicts to dict of arrays
@@ -186,6 +179,7 @@ function synthesize(atm::ModelAtmosphere, linelist, A_X::Vector{<:Real},
         α[i, :] .= α_cntm(all_λs)
     end
 
+    # calculate α(5000 Å) if necessary and not passed to synthesize
     if !bezier_radiative_transfer && isnothing(_alpha_5000)
         for (i, layer, nₑ, n_dict) in zip(1:length(nₑs), atm.layers, nₑs, n_dicts)
             α5[i] = total_continuum_absorption([c_cgs/5e-5], layer.temp, nₑ, n_dict, partition_funcs)[1]
@@ -196,6 +190,7 @@ function synthesize(atm::ModelAtmosphere, linelist, A_X::Vector{<:Real},
         throw(ArgumentError("_alpha_5000 was provided, but will be ignored because of bezier radiative transfer."))
     end
 
+    # calculate hydrogen line absorption if necessary
     if hydrogen_lines
         for (i, layer, nₑ, n_dict) in zip(1:length(nₑs), atm.layers, nₑs, n_dicts)
             hydrogen_line_absorption!(view(α, i, :), wl_ranges, layer.temp, nₑ,
@@ -365,14 +360,20 @@ function blackbody(T, λ)
 end
 
 """
-    each_layer_chemical_equillibrium(atm, abs_abundances, ionization_energies, partition_funcs, 
+    each_layer_chemical_equillibrium(atm, A_X, ionization_energies, partition_funcs, 
                                      log_equilibrium_constants; kwargs...)
 
 Calculate the electron number density and number densities of all species in chemical equilibrium 
 for each layer of the atmosphere. Helper function for [`synthesize`](@ref).
 """
-function each_layer_chemical_equillibrium(atm, abs_abundances, ionization_energies, partition_funcs, 
+function each_layer_chemical_equillibrium(atm, A_X, ionization_energies, partition_funcs, 
                                           log_equilibrium_constants, electron_number_density_warn_threshold)
+    if length(A_X) != MAX_ATOMIC_NUMBER || (A_X[1] != 12)
+        throw(ArgumentError("A(H) must be a 92-element vector with A[1] == 12."))
+    end
+    abs_abundances = @. 10^(A_X - 12) # n(X) / n_tot
+    abs_abundances ./= sum(abs_abundances) #normalize so that sum(n(X)/n_tot) = 1
+
     pairs = map(atm.layers) do layer
         chemical_equilibrium(layer.temp, layer.number_density, layer.electron_number_density, 
                              abs_abundances, ionization_energies, partition_funcs, 
