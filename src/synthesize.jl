@@ -97,7 +97,10 @@ function synthesize(atm::ModelAtmosphere, linelist, A_X::Vector{<:Real},
                     bezier_radiative_transfer=false, ionization_energies=ionization_energies, 
                     partition_funcs=default_partition_funcs, 
                     log_equilibrium_constants=default_log_equilibrium_constants,
-                    _alpha_cntm_itps=nothing, _nes=nothing, _number_densities=nothing)
+                    # These are used to pass in values calculated by a previous synthesis.
+                    # For advanced use only.
+                    _alpha_cntm_itps=nothing, _nes=nothing, _number_densities=nothing,
+                     _alpha_5000=nothing)
 
     # Convert air to vacuum wavelenths if necessary.
     if air_wavelengths
@@ -183,10 +186,14 @@ function synthesize(atm::ModelAtmosphere, linelist, A_X::Vector{<:Real},
         α[i, :] .= α_cntm(all_λs)
     end
 
-    if !bezier_radiative_transfer
+    if !bezier_radiative_transfer && isnothing(_alpha_5000)
         for (i, layer, nₑ, n_dict) in zip(1:length(nₑs), atm.layers, nₑs, n_dicts)
             α5[i] = total_continuum_absorption([c_cgs/5e-5], layer.temp, nₑ, n_dict, partition_funcs)[1]
         end
+    elseif !bezier_radiative_transfer # and _alpha_5000 is passed
+        α5 .= _alpha_5000
+    elseif !isnothing(_alpha_5000)
+        throw(ArgumentError("_alpha_5000 was provided, but will be ignored because of bezier radiative transfer."))
     end
 
     if hydrogen_lines
@@ -221,7 +228,7 @@ function synthesize(atm::ModelAtmosphere, linelist, A_X::Vector{<:Real},
 
     (flux=flux, intensity=intensity, alpha=α, number_densities=number_densities, 
     electron_number_density=nₑs, wavelengths=all_λs.*1e8, subspectra=subspectra, 
-    alpha_cntm_itps=α_cntm_itps)
+    alpha_cntm_itps=α_cntm_itps, alpha_5000=α5)
 end
 
 """
