@@ -1,9 +1,52 @@
+function fit_EWs(atm::ModelAtmosphere, linelist, A_X, EWs; kwargs...)
+    example_ind = 35
+
+    example_line = linelist[example_ind]
+    A_X, itps, example_sol = fit_EWs_exactly(atm, [example_line], A_X, EWs[example_ind]; 
+                                             abundance_grid=-5:0.1:3,kwargs...)
+    curve_of_growth = itps[1]
+
+    line_center_ind = argmin(abs.(example_sol.wavelengths .- example_line.wl*1e8))
+    example_sol.alpha[line_center_ind:line_center_ind]
+    τ = similar(example_sol.alpha[:, line_center_ind])
+    RadiativeTransfer.BezierTransfer.compute_tau_bezier!(τ, get_zs(atm), example_sol.alpha[:, line_center_ind:line_center_ind])
+    contribution = blackbody.(get_temps(atm), example_line.wl) .* exp.(-τ)
+    #formation_layer_ind = argmax(contribution)
+    formation_layer_ind = 41
+    formation_layer = atm.layers[formation_layer_ind]
+
+    #display([τ contribution])
+    #println(formation_layer_ind)
+    #println(formation_layer)
+
+    α_eachline = reverse(ContinuumAbsorption.total_continuum_absorption(
+        reverse([c_cgs/line.wl for line in linelist]),
+        formation_layer.temp,
+        example_sol.electron_number_density[formation_layer_ind],
+        Dict([k=>example_sol.number_densities[k][formation_layer_ind] 
+              for k in keys(example_sol.number_densities)]),
+        Korg.default_partition_funcs))
+
+    α_cntm_example = example_sol.alpha_cntm_itps[formation_layer_ind](example_line.wl)
+    θ = log10(ℯ)/(kboltz_eV * formation_layer.temp) 
+
+    # Gray equation 16.6 
+    A_Xs = curve_of_growth.(EWs)
+    ΔA_Xs = map(linelist, α_eachline) do line, α
+        line.log_gf - example_line.log_gf 
+        + log10(line.wl/example_line.wl) 
+        #- log10(α/α_cntm_example)
+        #- θ * (line.E_lower - example_line.E_lower)
+    end
+    A_Xs .- ΔA_Xs
+end
+
 """
 TODO
 """
-function fit_EWs(atm::ModelAtmosphere, linelist, A_X, EWs; abundance_grid=-2:0.1:1, 
-                 solar_abundances=default_solar_abundances, max_window_size=5.0,
-                 wavelength_resolution=0.01, synthesize_kwargs...)
+function fit_EWs_exactly(atm::ModelAtmosphere, linelist, A_X, EWs; abundance_grid=-2:0.1:1, 
+                        solar_abundances=default_solar_abundances, max_window_size=5.0,
+                        wavelength_resolution=0.01, synthesize_kwargs...)
     @assert issorted(linelist, by=l->l.wl)
 
     atoms = map(linelist) do line
@@ -66,5 +109,5 @@ function fit_EWs(atm::ModelAtmosphere, linelist, A_X, EWs; abundance_grid=-2:0.1
         itp(EW), itp
     end
 
-    first.(ps), last.(ps), windows
+    first.(ps), last.(ps), sol
 end
