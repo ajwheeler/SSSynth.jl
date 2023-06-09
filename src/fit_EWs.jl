@@ -35,10 +35,10 @@ function fit_EWs(atm::ModelAtmosphere, linelist, A_X, EWs; kwargs...)
     ΔA_Xs = map(linelist, α_eachline) do line, α
         line.log_gf - example_line.log_gf 
         + log10(line.wl/example_line.wl) 
-        #- log10(α/α_cntm_example)
-        #- θ * (line.E_lower - example_line.E_lower)
+        - log10(α/α_cntm_example)
+        - θ * (line.E_lower - example_line.E_lower)
     end
-    A_Xs .- ΔA_Xs
+    A_Xs .- ΔA_Xs, ΔA_Xs
 end
 
 """
