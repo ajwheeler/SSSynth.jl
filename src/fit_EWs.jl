@@ -1,23 +1,22 @@
+"""
+TODO
+"""
 function fit_EWs(atm::ModelAtmosphere, linelist, A_X, EWs; kwargs...)
-    example_ind = 35
+    example_ind = 2
 
     example_line = linelist[example_ind]
-    A_X, itps, example_sol = fit_EWs_exactly(atm, [example_line], A_X, EWs[example_ind]; 
+    _, itps, example_sol = fit_EWs_exactly(atm, [example_line], A_X, EWs[example_ind]; 
                                              abundance_grid=-5:0.1:3,kwargs...)
     curve_of_growth = itps[1]
 
     line_center_ind = argmin(abs.(example_sol.wavelengths .- example_line.wl*1e8))
-    example_sol.alpha[line_center_ind:line_center_ind]
+
     τ = similar(example_sol.alpha[:, line_center_ind])
     RadiativeTransfer.BezierTransfer.compute_tau_bezier!(τ, get_zs(atm), example_sol.alpha[:, line_center_ind:line_center_ind])
-    contribution = blackbody.(get_temps(atm), example_line.wl) .* exp.(-τ)
-    #formation_layer_ind = argmax(contribution)
-    formation_layer_ind = 41
-    formation_layer = atm.layers[formation_layer_ind]
 
-    #display([τ contribution])
-    #println(formation_layer_ind)
-    #println(formation_layer)
+    contribution = blackbody.(get_temps(atm), example_line.wl) .* exp.(-τ)
+    formation_layer_ind = argmax(contribution)
+    formation_layer = atm.layers[formation_layer_ind]
 
     α_eachline = reverse(ContinuumAbsorption.total_continuum_absorption(
         reverse([c_cgs/line.wl for line in linelist]),
@@ -29,14 +28,22 @@ function fit_EWs(atm::ModelAtmosphere, linelist, A_X, EWs; kwargs...)
 
     α_cntm_example = example_sol.alpha_cntm_itps[formation_layer_ind](example_line.wl)
     θ = log10(ℯ)/(kboltz_eV * formation_layer.temp) 
+    #println(θ)
+    #println(example_line.E_lower)
 
+    #correction = θ .* ([l.E_lower for l in linelist] .- example_line.E_lower)
+
+
+    #display([α_eachline ./ α_cntm_example [line.E_lower - example_line.E_lower for line in linelist]])
     # Gray equation 16.6 
     A_Xs = curve_of_growth.(EWs)
     ΔA_Xs = map(linelist, α_eachline) do line, α
-        line.log_gf - example_line.log_gf 
+        (0
+        + line.log_gf - example_line.log_gf 
         + log10(line.wl/example_line.wl) 
         - log10(α/α_cntm_example)
         - θ * (line.E_lower - example_line.E_lower)
+        )
     end
     A_Xs .- ΔA_Xs, ΔA_Xs
 end
@@ -73,13 +80,13 @@ function fit_EWs_exactly(atm::ModelAtmosphere, linelist, A_X, EWs; abundance_gri
     end
 
     # do an initial synthesis to get chemical equilibrium, continuum alpha, and subspectra
-    sol = synthesize(atm, linelist, A_X, windows; electron_number_density_warn_threshold=1e10,
+    example_sol = synthesize(atm, linelist, A_X, windows; electron_number_density_warn_threshold=1e10,
                      line_buffer=0.0, hydrogen_lines=false, synthesize_kwargs...)
-    nₑs = sol.electron_number_density
-    number_densities = sol.number_densities
-    subspectra = sol.subspectra
-    cntm_alpha = sol.alpha_cntm_itps
-    α5 = sol.alpha_5000
+    nₑs = example_sol.electron_number_density
+    number_densities = example_sol.number_densities
+    subspectra = example_sol.subspectra
+    cntm_alpha = example_sol.alpha_cntm_itps
+    α5 = example_sol.alpha_5000
 
     cntm_sol = synthesize(atm, [], A_X, windows; hydrogen_lines=false, line_buffer=0.0,
                          electron_number_density_warn_threshold=1e10,
@@ -109,5 +116,5 @@ function fit_EWs_exactly(atm::ModelAtmosphere, linelist, A_X, EWs; abundance_gri
         itp(EW), itp
     end
 
-    first.(ps), last.(ps), sol
+    first.(ps), last.(ps), example_sol
 end
