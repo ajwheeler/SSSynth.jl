@@ -1,13 +1,66 @@
+#function iterative_fit_EW(atm::ModelAtmosphere, linelist, A_X, EWs; EW_tol=1e-4, synthesis_kwargs...)
+#    atoms = map(linelist) do line
+#        get_atoms(line.species)
+#    end
+#    if !all(length.(atoms) .== 1)
+#        throw(ArgumentError("Can't fit the EWs of a molecular line"))
+#    end
+#    element = atoms[1][1]
+#    if !all(first.(atoms) .== [element])
+#        throw(ArgumentError("Can't fit the EWs of lines from different elements"))
+#    end
+#
+#    # do an initial synthesis to get chemical equilibrium, continuum alpha, and subspectra
+#    example_sol = synthesize(atm, linelist, A_X, windows; electron_number_density_warn_threshold=1e10,
+#                     line_buffer=0.0, hydrogen_lines=false, synthesize_kwargs...)
+#    nₑs = example_sol.electron_number_density
+#    number_densities = example_sol.number_densities
+#    subspectra = example_sol.subspectra
+#    cntm_alpha = example_sol.alpha_cntm_itps
+#    α5 = example_sol.alpha_5000
+#
+#   starting_abund = A_X[element]
+#   for (line, obs_EW) in (linelist, EWs)
+#        abund = starting_abund
+#        while true
+#            ns = copy(number_densities)
+#            for spec in keys(ns)
+#                ns[spec] = ns[spec] * 10^((X_H+solar_abundances[element]-A_X[element]) * sum(get_atoms(spec) .== element))
+#            end
+#            sol = synthesize(atm, linelist, A_X, windows; hydrogen_lines=false, line_buffer=0.0,
+#                             electron_number_density_warn_threshold=1e10,
+#                             _alpha_cntm_itps=cntm_alpha, _nes=nₑs, _number_densities=ns, 
+#                             _alpha_5000=α5, synthesize_kwargs...)
+#            absorption = 1 .- sol.flux ./ cntm_sol.flux
+#            synth_EW = sum(absorption[s]) * wavelength_resolution
+#
+#            if abs(synth_EW - obs_EW) < EW_tol
+#                break
+#            end
+#        end
+#
+#   end
+#
+#end
+
 """
 TODO
 """
 function fit_EWs(atm::ModelAtmosphere, linelist, A_X, EWs; kwargs...)
-    example_ind = 2
-
+    example_ind = 1
     example_line = linelist[example_ind]
+
+    #single_line_crude_A_X = fit_EWs_exactly(atm, [example_line], A_X, EWs[example_ind]; 
+    #                                         abundance_grid=-5:0.5:3,kwargs...)[1][1]
+    #refined_A_X_grid = single_line_crude_A_X-0.5 : 0.1 : single_line_crude_A_X+0.5
+    #single_line_A_X, itps, example_sol = fit_EWs_exactly(atm, [example_line], A_X, EWs[example_ind]; 
+    #                                         abundance_grid=refined_A_X_grid, kwargs...)
     _, itps, example_sol = fit_EWs_exactly(atm, [example_line], A_X, EWs[example_ind]; 
-                                             abundance_grid=-5:0.1:3,kwargs...)
+                                           abundance_grid=-5:0.1:3, kwargs...)
     curve_of_growth = itps[1]
+
+    #println(single_line_crude_A_X)
+    #println(single_line_A_X)
 
     line_center_ind = argmin(abs.(example_sol.wavelengths .- example_line.wl*1e8))
 
@@ -28,30 +81,32 @@ function fit_EWs(atm::ModelAtmosphere, linelist, A_X, EWs; kwargs...)
 
     α_cntm_example = example_sol.alpha_cntm_itps[formation_layer_ind](example_line.wl)
     θ = log10(ℯ)/(kboltz_eV * formation_layer.temp) 
-    #println(θ)
-    #println(example_line.E_lower)
 
-    #correction = θ .* ([l.E_lower for l in linelist] .- example_line.E_lower)
+    #ΔEWs = map(linelist, α_eachline) do line, α
+    #    (line.log_gf - example_line.log_gf 
+    #    + log10(line.wl/example_line.wl) 
+    #    - log10(α/α_cntm_example)
+    #    - θ * (line.E_lower - example_line.E_lower))
+    #end
+    #A_Xs = curve_of_growth.(EWs + ΔEWs)
 
-
-    #display([α_eachline ./ α_cntm_example [line.E_lower - example_line.E_lower for line in linelist]])
-    # Gray equation 16.6 
     A_Xs = curve_of_growth.(EWs)
+    # Gray equation 16.6 
     ΔA_Xs = map(linelist, α_eachline) do line, α
-        (0
-        + line.log_gf - example_line.log_gf 
+        (line.log_gf - example_line.log_gf 
         + log10(line.wl/example_line.wl) 
         - log10(α/α_cntm_example)
-        - θ * (line.E_lower - example_line.E_lower)
-        )
+        - θ * (line.E_lower - example_line.E_lower))
     end
-    A_Xs .- ΔA_Xs, ΔA_Xs
+    A_Xs .- ΔA_Xs
+    #A_Xs 
 end
 
 """
 TODO
 """
-function fit_EWs_exactly(atm::ModelAtmosphere, linelist, A_X, EWs; abundance_grid=-2:0.1:1, 
+function fit_EWs_exactly(atm::ModelAtmosphere, linelist, A_X, EWs; abundance_grid=-2:0.05:1, 
+                        abundance_subgrid_range=1.0, abundance_subgrid_step=0.1,
                         solar_abundances=default_solar_abundances, max_window_size=5.0,
                         wavelength_resolution=0.01, synthesize_kwargs...)
     @assert issorted(linelist, by=l->l.wl)
@@ -88,10 +143,18 @@ function fit_EWs_exactly(atm::ModelAtmosphere, linelist, A_X, EWs; abundance_gri
     cntm_alpha = example_sol.alpha_cntm_itps
     α5 = example_sol.alpha_5000
 
-    cntm_sol = synthesize(atm, [], A_X, windows; hydrogen_lines=false, line_buffer=0.0,
+    window_layer = 20
+    smaller_windows = map(windows, subspectra) do window, subspectrum
+        α_cntm = cntm_alpha[window_layer].(window * 1e-8)
+        line_is_big = ((example_sol.alpha[window_layer, subspectrum] - α_cntm) ./ α_cntm) .> 1e-3
+        window[findfirst(line_is_big)] : 0.01 : window[findlast(line_is_big)]
+    end
+
+    cntm_sol = synthesize(atm, [], A_X, smaller_windows; hydrogen_lines=false, line_buffer=0.0,
                          electron_number_density_warn_threshold=1e10,
                          _alpha_cntm_itps=cntm_alpha, _nes=nₑs, _number_densities=number_densities, 
                          _alpha_5000=α5, synthesize_kwargs...)
+    subspectra = cntm_sol.subspectra # update subspectra to refer to the smaller windows
 
     absorptions = map(abundance_grid) do X_H
         # naively rescale the number densities for all species involving element.
@@ -101,7 +164,7 @@ function fit_EWs_exactly(atm::ModelAtmosphere, linelist, A_X, EWs; abundance_gri
             ns[spec] = ns[spec] * 10^((X_H+solar_abundances[element]-A_X[element]) * sum(get_atoms(spec) .== element))
         end
 
-        sol = synthesize(atm, linelist, A_X, windows; hydrogen_lines=false, line_buffer=0.0,
+        sol = synthesize(atm, linelist, A_X, smaller_windows; hydrogen_lines=false, line_buffer=0.0,
                          electron_number_density_warn_threshold=1e10,
                          _alpha_cntm_itps=cntm_alpha, _nes=nₑs, _number_densities=ns, 
                          _alpha_5000=α5, synthesize_kwargs...)
