@@ -16,7 +16,7 @@
 #    nₑs = example_sol.electron_number_density
 #    number_densities = example_sol.number_densities
 #    subspectra = example_sol.subspectra
-#    cntm_alpha = example_sol.alpha_cntm_itps
+#    cntm_alpha = example_sol._alpha_cntm_itps
 #    α5 = example_sol.alpha_5000
 #
 #   starting_abund = A_X[element]
@@ -79,7 +79,7 @@ function fit_EWs(atm::ModelAtmosphere, linelist, A_X, EWs; kwargs...)
               for k in keys(example_sol.number_densities)]),
         Korg.default_partition_funcs))
 
-    α_cntm_example = example_sol.alpha_cntm_itps[formation_layer_ind](example_line.wl)
+    α_cntm_example = example_sol._alpha_cntm_itps[formation_layer_ind](example_line.wl)
     θ = log10(ℯ)/(kboltz_eV * formation_layer.temp) 
 
     #ΔEWs = map(linelist, α_eachline) do line, α
@@ -140,7 +140,7 @@ function fit_EWs_exactly(atm::ModelAtmosphere, linelist, A_X, EWs; abundance_gri
     nₑs = example_sol.electron_number_density
     number_densities = example_sol.number_densities
     subspectra = example_sol.subspectra
-    cntm_alpha = example_sol.alpha_cntm_itps
+    cntm_alpha = example_sol._alpha_cntm_itps
     α5 = example_sol.alpha_5000
 
     window_layer = 20
@@ -152,8 +152,8 @@ function fit_EWs_exactly(atm::ModelAtmosphere, linelist, A_X, EWs; abundance_gri
 
     cntm_sol = synthesize(atm, [], A_X, smaller_windows; hydrogen_lines=false, line_buffer=0.0,
                          electron_number_density_warn_threshold=1e10,
-                         _alpha_cntm_itps=cntm_alpha, _nes=nₑs, _number_densities=number_densities, 
-                         _alpha_5000=α5, synthesize_kwargs...)
+                         _alpha_cntm_itps=cntm_alpha, _electron_number_densities=nₑs, 
+                         _number_densities=number_densities, _alpha_5000=α5, synthesize_kwargs...)
     subspectra = cntm_sol.subspectra # update subspectra to refer to the smaller windows
 
     absorptions = map(abundance_grid) do X_H
@@ -166,7 +166,7 @@ function fit_EWs_exactly(atm::ModelAtmosphere, linelist, A_X, EWs; abundance_gri
 
         sol = synthesize(atm, linelist, A_X, smaller_windows; hydrogen_lines=false, line_buffer=0.0,
                          electron_number_density_warn_threshold=1e10,
-                         _alpha_cntm_itps=cntm_alpha, _nes=nₑs, _number_densities=ns, 
+                         _alpha_cntm_itps=cntm_alpha, _electron_number_densities=nₑs, _number_densities=ns, 
                          _alpha_5000=α5, synthesize_kwargs...)
         1 .- sol.flux ./ cntm_sol.flux
     end

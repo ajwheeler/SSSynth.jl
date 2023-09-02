@@ -15,6 +15,11 @@ interpolate_marcs
 format_A_X
 ```
 
+# Fitting
+```@docs
+find_best_fit_params
+```
+
 # Secondary functions
 You don't need use these to synthesize spectra, but they might be relevant depending on what you are 
 doing.
@@ -23,8 +28,10 @@ doing.
 These are used to transform observational or synthetic spectra.
 
 ```@docs
-Korg.rectify
 Korg.constant_R_LSF
+Korg.compute_LSF_matrix
+Korg.air_to_vacuum
+Korg.vacuum_to_air
 ```
 
 ## Line absorption 
@@ -80,6 +87,4 @@ Korg.chemical_equilibrium
 
 ```@docs
 Korg.blackbody
-Korg.air_to_vacuum
-Korg.vacuum_to_air
 ```
